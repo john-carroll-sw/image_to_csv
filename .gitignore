@@ -45,3 +45,4 @@ ENV/
 # Output files
 output/
 *.csv
+.DS_Store
