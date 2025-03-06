@@ -2,6 +2,14 @@
 
 set -e  # Exit immediately if a command exits with a non-zero status
 
+# Configure Azure CLI to allow preview extensions without prompting
+echo "Configuring Azure CLI to allow preview extensions..."
+az config set extension.dynamic_install_allow_preview=true
+
+# Auto-install application-insights extension silently
+echo "Installing required extensions..."
+az extension add --name application-insights --yes || echo "Failed to install application-insights extension"
+
 # Load environment variables from .env file
 echo "Loading environment variables from .env file"
 if [ ! -f .env ]; then
@@ -48,6 +56,26 @@ DOCKER_IMAGE_TAG=${AZURE_DOCKER_IMAGE_TAG:-"latest"}
 # App-specific resources
 WEB_APP_NAME="app-${APP_NAME}"
 IMAGE_NAME="${APP_NAME}"
+APP_INSIGHTS_NAME="${WEB_APP_NAME}-ai"
+
+# Set up retry function for Azure commands
+function retry {
+  local n=1
+  local max=5
+  local delay=15
+  while true; do
+    "$@" && break || {
+      if [[ $n -lt $max ]]; then
+        ((n++))
+        echo "Command failed. Attempt $n/$max in $delay seconds:"
+        sleep $delay;
+      else
+        echo "The command has failed after $n attempts."
+        return 1
+      fi
+    }
+  done
+}
 
 echo "Starting deployment for app: $APP_NAME"
 echo "RESOURCE_GROUP: $RESOURCE_GROUP"
@@ -80,6 +108,11 @@ else
     echo "Resource group $RESOURCE_GROUP already exists."
 fi
 
+# Register necessary resource providers
+echo "Registering necessary Azure resource providers..."
+az provider register --namespace Microsoft.Insights
+az provider register --namespace Microsoft.OperationalInsights
+
 # Create Azure Container Registry if it doesn't exist
 if ! az acr show --name $ACR_NAME &>/dev/null; then
     echo "Creating Azure Container Registry: $ACR_NAME"
@@ -100,6 +133,10 @@ fi
 if ! az monitor log-analytics workspace show --workspace-name $LOG_ANALYTICS --resource-group $RESOURCE_GROUP &>/dev/null; then
     echo "Creating Log Analytics workspace: $LOG_ANALYTICS"
     az monitor log-analytics workspace create --resource-group $RESOURCE_GROUP --workspace-name $LOG_ANALYTICS
+    
+    # Wait for Log Analytics workspace to be fully provisioned
+    echo "Waiting for Log Analytics workspace to be fully provisioned..."
+    sleep 30
 else
     echo "Log Analytics workspace $LOG_ANALYTICS already exists."
 fi
@@ -137,7 +174,6 @@ else
 fi
 
 # Get all environment variable names from .env file
-# Filter out the AZURE_* deployment variables to avoid confusion with app settings
 ENV_VARS=$(grep -v '^#' .env | grep -v '^AZURE_RESOURCE' | grep -v '^AZURE_LOCATION' \
           | grep -v '^AZURE_ACR' | grep -v '^AZURE_APP_SERVICE' | grep -v '^AZURE_KEY_VAULT' \
           | grep -v '^AZURE_LOG_ANALYTICS' | grep -v 'DOCKER_IMAGE_TAG' | grep '=' | cut -d '=' -f1)
@@ -161,34 +197,120 @@ echo "Enabling application logs for Web App: $WEB_APP_NAME"
 az webapp log config --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP \
     --application-logging filesystem --level information
 
-# Set up Application Insights
+# Set up Application Insights with ARM template approach
 echo "Setting up Application Insights for Web App: $WEB_APP_NAME"
-APP_INSIGHTS_NAME="${WEB_APP_NAME}-ai"
 
-# Create Application Insights if it doesn't exist
-if ! az monitor app-insights component show --app $APP_INSIGHTS_NAME --resource-group $RESOURCE_GROUP &>/dev/null; then
-    echo "Creating Application Insights: $APP_INSIGHTS_NAME"
-    az monitor app-insights component create --app $APP_INSIGHTS_NAME \
+# Check if Application Insights exists
+if az monitor app-insights component show --app $APP_INSIGHTS_NAME --resource-group $RESOURCE_GROUP --only-show-errors &>/dev/null; then
+    echo "Found existing Application Insights: $APP_INSIGHTS_NAME"
+    
+    # Check its provisioning state
+    PROVISION_STATE=$(az monitor app-insights component show \
+        --app $APP_INSIGHTS_NAME \
         --resource-group $RESOURCE_GROUP \
-        --location $LOCATION \
-        --kind web \
-        --application-type web \
-        --workspace $LOG_ANALYTICS
-else
-    echo "Application Insights $APP_INSIGHTS_NAME already exists."
+        --query "provisioningState" -o tsv --only-show-errors 2>/dev/null || echo "Unknown")
+    
+    if [ "$PROVISION_STATE" != "Succeeded" ]; then
+        echo "Existing Application Insights is in state: $PROVISION_STATE"
+        echo "Removing and recreating Application Insights..."
+        az monitor app-insights component delete \
+            --app $APP_INSIGHTS_NAME \
+            --resource-group $RESOURCE_GROUP \
+            --yes --only-show-errors
+        # Wait for deletion to complete
+        sleep 30
+    else
+        echo "Application Insights is in a good state."
+    fi
 fi
 
-# Get the instrumentation key
-INSTRUMENTATION_KEY=$(az monitor app-insights component show \
-    --app $APP_INSIGHTS_NAME \
-    --resource-group $RESOURCE_GROUP \
-    --query instrumentationKey \
-    --output tsv)
+# Create Application Insights using ARM template approach if it doesn't exist or was deleted
+if ! az monitor app-insights component show --app $APP_INSIGHTS_NAME --resource-group $RESOURCE_GROUP --only-show-errors &>/dev/null; then
+    echo "Creating Application Insights using ARM template..."
+    
+    # Create a unique file for ARM template
+    TEMPLATE_FILE="appinsights_template_$APP_NAME.json"
+    
+    # Create ARM template for Application Insights
+    cat > $TEMPLATE_FILE << EOL
+{
+    "\$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "resources": [
+        {
+            "type": "microsoft.insights/components",
+            "apiVersion": "2020-02-02",
+            "name": "${APP_INSIGHTS_NAME}",
+            "location": "${LOCATION}",
+            "kind": "web",
+            "properties": {
+                "Application_Type": "web",
+                "WorkspaceResourceId": "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.OperationalInsights/workspaces/${LOG_ANALYTICS}",
+                "publicNetworkAccessForIngestion": "Enabled",
+                "publicNetworkAccessForQuery": "Enabled"
+            }
+        }
+    ]
+}
+EOL
+    
+    # Deploy the ARM template
+    echo "Deploying ARM template..."
+    az deployment group create \
+      --name "deploy-appinsights-$APP_NAME" \
+      --resource-group $RESOURCE_GROUP \
+      --template-file $TEMPLATE_FILE \
+      --only-show-errors
+    
+    # Clean up template file
+    rm $TEMPLATE_FILE
+    
+    echo "Waiting for Application Insights to be fully provisioned..."
+    sleep 15
+else
+    echo "Application Insights already exists, using existing instance."
+fi
 
-# Add Application Insights to the Web App
-az webapp config appsettings set --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP \
-    --settings APPINSIGHTS_INSTRUMENTATIONKEY=$INSTRUMENTATION_KEY \
-    APPLICATIONINSIGHTS_CONNECTION_STRING=InstrumentationKey=$INSTRUMENTATION_KEY
+# Get the instrumentation key with retries
+echo "Getting instrumentation key..."
+MAX_RETRIES=5
+RETRY_COUNT=0
+INSTRUMENTATION_KEY=""
+
+while [ -z "$INSTRUMENTATION_KEY" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+    INSTRUMENTATION_KEY=$(az monitor app-insights component show \
+        --app $APP_INSIGHTS_NAME \
+        --resource-group $RESOURCE_GROUP \
+        --query instrumentationKey \
+        --output tsv --only-show-errors 2>/dev/null || echo "")
+    
+    if [ -z "$INSTRUMENTATION_KEY" ]; then
+        RETRY_COUNT=$((RETRY_COUNT+1))
+        echo "Retry $RETRY_COUNT/$MAX_RETRIES: Failed to get instrumentation key. Waiting 10 seconds..."
+        sleep 10
+    else
+        echo "Successfully retrieved instrumentation key!"
+    fi
+done
+
+if [ -n "$INSTRUMENTATION_KEY" ]; then
+    # Add Application Insights to the Web App
+    echo "Adding Application Insights to Web App..."
+    az webapp config appsettings set --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP \
+        --settings APPINSIGHTS_INSTRUMENTATIONKEY=$INSTRUMENTATION_KEY \
+        APPLICATIONINSIGHTS_CONNECTION_STRING=InstrumentationKey=$INSTRUMENTATION_KEY \
+        --only-show-errors
+    
+    echo "Application Insights successfully configured."
+else
+    echo "Warning: Could not retrieve instrumentation key after $MAX_RETRIES attempts."
+    echo "You may need to manually configure Application Insights for your web app:"
+    echo "./create_appinsights.sh $APP_NAME"
+fi
+
+# Enable Always On for the web app to improve reliability
+echo "Enabling 'Always On' for the Web App..."
+az webapp config set --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP --always-on true
 
 echo "Deployment completed. You can access your app at https://$WEB_APP_NAME.azurewebsites.net"
 echo "Application Insights dashboard: https://portal.azure.com/#resource/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/microsoft.insights/components/$APP_INSIGHTS_NAME/overview"
