@@ -1,4 +1,5 @@
-FROM python:3.10-slim
+# FROM python:3.10-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -12,10 +13,6 @@ RUN pip show streamlit | grep -E "Version|Location"
 
 # Copy application code
 COPY . .
-
-# Run debug script to verify parameters
-RUN echo "==== RUNNING STREAMLIT DEBUG SCRIPT ====" && \
-    python debug_streamlit.py
 
 # Set environment variable for Streamlit
 ENV STREAMLIT_SERVER_PORT=8000

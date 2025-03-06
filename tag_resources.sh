@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Example usage: ./tag_resources.sh jcc-demos-rg
+# Example usage: ./tag_resources.sh app-demos-rg
 
 RESOURCE_GROUP=$1
 

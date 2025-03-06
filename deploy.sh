@@ -2,6 +2,17 @@
 
 set -e  # Exit immediately if a command exits with a non-zero status
 
+# Load environment variables from .env file
+echo "Loading environment variables from .env file"
+if [ ! -f .env ]; then
+    echo "Error: .env file not found. Please create one from .env.sample"
+    exit 1
+fi
+
+set -a
+source .env
+set +a
+
 # Check if the app name is provided as an argument
 if [ -z "$1" ]; then
     echo "Usage: $0 <app_name> [entry_file]"
@@ -9,30 +20,44 @@ if [ -z "$1" ]; then
     exit 1
 fi
 
-# Variables
+# Variables from command line args
 APP_NAME=$1
 ENTRY_FILE=${2:-"app.py"}  # Default to app.py if not provided
 
-# Common resources
-RESOURCE_GROUP="john-live-demos"
-LOCATION="eastus"
-ACR_NAME="jccdemo10acr"
-APP_SERVICE_PLAN="jcc-demos-asp"
-KEY_VAULT="jcc-demos-kv"
-LOG_ANALYTICS="jcc-demos-law"
+# Check if required environment variables are set
+REQUIRED_VARS=("AZURE_RESOURCE_GROUP" "AZURE_LOCATION" "AZURE_ACR_NAME" 
+              "AZURE_APP_SERVICE_PLAN" "AZURE_KEY_VAULT" "AZURE_LOG_ANALYTICS")
+              
+for var in "${REQUIRED_VARS[@]}"; do
+    if [ -z "${!var}" ]; then
+        echo "Error: Required environment variable $var is not set in .env file"
+        exit 1
+    fi
+done
+
+# Use environment variables for resources (with defaults for backward compatibility)
+RESOURCE_GROUP=${AZURE_RESOURCE_GROUP}
+LOCATION=${AZURE_LOCATION:-"eastus"}
+ACR_NAME=${AZURE_ACR_NAME}
+APP_SERVICE_PLAN=${AZURE_APP_SERVICE_PLAN}
+KEY_VAULT=${AZURE_KEY_VAULT}
+LOG_ANALYTICS=${AZURE_LOG_ANALYTICS}
+APP_SERVICE_SKU=${AZURE_APP_SERVICE_SKU:-"P1V3"}
+DOCKER_IMAGE_TAG=${AZURE_DOCKER_IMAGE_TAG:-"latest"}
 
 # App-specific resources
-WEB_APP_NAME="jcc-demo-${APP_NAME}"
+WEB_APP_NAME="app-${APP_NAME}"
 IMAGE_NAME="${APP_NAME}"
-DOCKER_IMAGE_TAG="latest"
 
 echo "Starting deployment for app: $APP_NAME"
 echo "RESOURCE_GROUP: $RESOURCE_GROUP"
+echo "LOCATION: $LOCATION"
 echo "ACR_NAME: $ACR_NAME"
 echo "APP_SERVICE_PLAN: $APP_SERVICE_PLAN"
 echo "WEB_APP_NAME: $WEB_APP_NAME"
 echo "IMAGE_NAME: $IMAGE_NAME"
 echo "ENTRY_FILE: $ENTRY_FILE"
+echo "APP_SERVICE_SKU: $APP_SERVICE_SKU"
 
 # Check if already logged in to Azure
 if ! az account show &>/dev/null; then
@@ -82,7 +107,7 @@ fi
 # Create App Service Plan if it doesn't exist
 if ! az appservice plan show --name $APP_SERVICE_PLAN --resource-group $RESOURCE_GROUP &>/dev/null; then
     echo "Creating App Service plan: $APP_SERVICE_PLAN"
-    az appservice plan create --name $APP_SERVICE_PLAN --resource-group $RESOURCE_GROUP --sku P1V3 --is-linux
+    az appservice plan create --name $APP_SERVICE_PLAN --resource-group $RESOURCE_GROUP --sku $APP_SERVICE_SKU --is-linux
 else
     echo "App Service plan $APP_SERVICE_PLAN already exists."
 fi
@@ -111,14 +136,11 @@ else
         --docker-registry-server-url https://$ACR_NAME.azurecr.io
 fi
 
-# Load environment variables from .env file
-echo "Loading environment variables from .env file"
-set -a
-source .env
-set +a
-
 # Get all environment variable names from .env file
-ENV_VARS=$(grep -v '^#' .env | grep '=' | cut -d '=' -f1)
+# Filter out the AZURE_* deployment variables to avoid confusion with app settings
+ENV_VARS=$(grep -v '^#' .env | grep -v '^AZURE_RESOURCE' | grep -v '^AZURE_LOCATION' \
+          | grep -v '^AZURE_ACR' | grep -v '^AZURE_APP_SERVICE' | grep -v '^AZURE_KEY_VAULT' \
+          | grep -v '^AZURE_LOG_ANALYTICS' | grep -v 'DOCKER_IMAGE_TAG' | grep '=' | cut -d '=' -f1)
 
 # Build the appsettings command
 APPSETTINGS_CMD="az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --settings"
@@ -136,7 +158,8 @@ eval $APPSETTINGS_CMD
 
 # Enable application logs
 echo "Enabling application logs for Web App: $WEB_APP_NAME"
-az webapp log config --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP --application-logging true --level information
+az webapp log config --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP \
+    --application-logging filesystem --level information
 
 # Set up Application Insights
 echo "Setting up Application Insights for Web App: $WEB_APP_NAME"

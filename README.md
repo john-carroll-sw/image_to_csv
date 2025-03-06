@@ -47,14 +47,6 @@ A Streamlit application that leverages Azure OpenAI's vision capabilities to con
    nano .env  # or use any text editor you prefer
    ```
 
-   Your `.env` file should contain:
-   ```
-   AZURE_OPENAI_EASTUS_ENDPOINT=your_endpoint_here
-   AZURE_OPENAI_EASTUS_API_KEY=your_api_key_here
-   AZURE_OPENAI_API_VERSION=2024-08-01-preview
-   AZURE_OPENAI_GPT4O_DEPLOYMENT=gpt-4o
-   ```
-
 ### Running the Application
 
 Run the Streamlit application:
@@ -84,6 +76,45 @@ The application uses a multi-stage approach to extract data:
 
 3. The resulting data is presented in an interactive table and made available for download as a CSV file.
 
+## 🚀 Deployment
+
+This application can be deployed to Azure using the provided `deploy.sh` script.
+
+### Deployment Prerequisites
+
+1. Ensure your `.env` file includes all the Azure deployment configuration values shown in `.env.sample`:
+
+   ```****
+   # Azure Deployment Configuration
+   AZURE_RESOURCE_GROUP=your-resource-group
+   AZURE_LOCATION=your-preferred-region
+   AZURE_ACR_NAME=your-container-registry
+   AZURE_APP_SERVICE_PLAN=your-app-service-plan
+   AZURE_KEY_VAULT=your-key-vault
+   AZURE_LOG_ANALYTICS=your-log-analytics
+   AZURE_APP_SERVICE_SKU=P1V3
+   AZURE_DOCKER_IMAGE_TAG=latest
+   ```
+
+2. Make sure you have the Azure CLI installed and have logged in:
+   ```bash
+   az login
+   ```
+
+### Deploying the Application
+
+Run the deployment script:
+```bash
+./deploy.sh image2csv app.py
+```
+- The first parameter (`image2csv`) is the name of your application
+- The second parameter (`app.py`) is the entry file for your Streamlit app
+
+After deployment completes, your app will be available at:
+```
+https://app-<yourappname>.azurewebsites.net
+```
+
 ## 📁 Project Structure
 
 ```
@@ -91,17 +122,17 @@ image_to_csv/
 ├── app.py               # Main Streamlit application
 ├── utils.py             # Utility functions for OpenAI client setup
 ├── requirements.txt     # Project dependencies
+├── deploy.sh            # Deployment script for Azure
+├── Dockerfile           # Container definition for deployment
 ├── .env                 # Environment variables (not tracked in git)
 ├── .env.sample          # Sample environment variables template
 ├── README.md            # Project documentation
-├── LICENSE              # MIT License
 └── docs/                # Documentation assets
-    └── images/          # Screenshots and images for documentation
 ```
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License.
 
 ## 🙏 Acknowledgements
 
