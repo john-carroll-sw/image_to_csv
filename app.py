@@ -8,6 +8,29 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from utils import setup_client
 
+# Define simple wrapper functions that handle version differences directly
+def safe_st_image(image, caption=None):
+    """Display an image in a way that works across Streamlit versions."""
+    try:
+        # Try the newer parameter name first
+        return st.image(image, caption=caption, use_container_width=True)
+    except TypeError:
+        # Fall back to the older parameter name
+        return st.image(image, caption=caption, use_column_width=True)
+
+def safe_st_dataframe(data):
+    """Display a dataframe in a way that works across Streamlit versions."""
+    try:
+        # Try the newer parameter name first
+        return st.dataframe(data, use_container_width=True)
+    except TypeError:
+        try:
+            # Try the middle version parameter name
+            return st.dataframe(data, width=None)
+        except:
+            # Just display it without width parameters
+            return st.dataframe(data)
+
 # Define the structured output model
 class CSVRow(BaseModel):
     values: List[str]
@@ -117,8 +140,8 @@ def main():
     deployment = gpt4o_deployment if model_option == "GPT-4o" else "GPT-4o"
     
     if uploaded_file is not None:
-        # Display the uploaded image
-        st.image(uploaded_file, caption='Uploaded Image', use_container_width=True)
+        # Display the uploaded image using our safe wrapper
+        safe_st_image(uploaded_file, caption="Uploaded Image")
         
         # Process when button is clicked
         if st.button("Convert to CSV"):
@@ -137,7 +160,9 @@ def main():
                         # Convert to DataFrame and display
                         df = convert_structured_to_dataframe(structured_result)
                         st.subheader("CSV Output:")
-                        st.dataframe(df, use_container_width=True)
+                        
+                        # Use safe wrapper for dataframe
+                        safe_st_dataframe(df)
                         
                         # Generate CSV for download
                         csv = df.to_csv(index=False)
@@ -163,7 +188,9 @@ def main():
                             if isinstance(result_data, pd.DataFrame):
                                 st.success("Successfully converted to CSV!")
                                 st.subheader("CSV Output:")
-                                st.dataframe(result_data, use_container_width=True)
+                                
+                                # Use safe wrapper for dataframe
+                                safe_st_dataframe(result_data)
                                 
                                 # Generate CSV for download
                                 csv = result_data.to_csv(index=False)

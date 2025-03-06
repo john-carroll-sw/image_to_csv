@@ -2,12 +2,20 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install dependencies
+# Install dependencies with exact versions from requirements.txt
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Print installed package versions for debugging
+RUN pip list | grep -E "streamlit|pandas|openai|pydantic"
+RUN pip show streamlit | grep -E "Version|Location"
+
 # Copy application code
 COPY . .
+
+# Run debug script to verify parameters
+RUN echo "==== RUNNING STREAMLIT DEBUG SCRIPT ====" && \
+    python debug_streamlit.py
 
 # Set environment variable for Streamlit
 ENV STREAMLIT_SERVER_PORT=8000
@@ -21,5 +29,7 @@ ENV ENTRY_FILE=${ENTRY_FILE}
 # Expose port
 EXPOSE 8000
 
-# Start the Streamlit app
-CMD streamlit run $ENTRY_FILE --server.port 8000 --server.enableCORS false --server.enableXsrfProtection false
+# Start the Streamlit app with additional debug information
+CMD echo "Starting Streamlit app with Python $(python --version)" && \
+    streamlit --version && \
+    streamlit run $ENTRY_FILE --server.port 8000 --server.enableCORS false --server.enableXsrfProtection false
