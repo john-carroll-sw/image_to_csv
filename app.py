@@ -7,6 +7,67 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from utils import setup_client
+from auth import require_auth, get_username, logout, is_authenticated, AUTH_ENABLED
+
+# Set page configuration
+st.set_page_config(
+    page_title="Image to CSV Converter",
+    page_icon="📊",
+)
+
+# Check for logout action through query parameter
+if AUTH_ENABLED and "logout" in st.query_params:
+    st.query_params.clear()
+    logout()
+    # Don't call st.rerun() here, logout() will handle redirection
+
+# Check authentication before proceeding
+if not require_auth():
+    st.stop()
+
+# Header with GitHub link and user info
+header_cols = st.columns([4, 2])
+with header_cols[0]:
+    # GitHub repository link
+    st.markdown(
+        """
+        <div style="margin-top: 5px;">
+            <a href="https://github.com/john-carroll-sw/image_to_csv" target="_blank">
+                <img src="https://img.shields.io/badge/GitHub-View%20on%20GitHub-blue?logo=github" alt="GitHub Repository"/>
+            </a>
+        </div>
+        """, 
+        unsafe_allow_html=True
+    )
+    
+with header_cols[1]:
+    # Only show user info if authenticated
+    if AUTH_ENABLED and is_authenticated():
+        st.markdown(f"""
+        <div style="display: flex; justify-content: flex-end; align-items: center;">
+            <a href="?logout=true" style="display: inline-flex; align-items: center; justify-content: center; 
+                padding: 5px 12px; border-radius: 4px; background: transparent; 
+                color: currentColor; border: none; cursor: pointer; transition: background 0.2s;
+                text-decoration: none;" 
+                onmouseover="this.style.background='rgba(0,0,0,0.05)'" 
+                onmouseout="this.style.background='transparent'">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" 
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="margin-right: 5px;">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <polyline points="16 17 21 12 16 7"></polyline>
+            <line x1="21" y1="12" x2="9" y2="12"></line>
+                </svg>
+                Logout
+            </a>
+        </div>
+        """, unsafe_allow_html=True)
+
+# Full width title below
+st.title("Image to CSV Converter")
+
+
+st.write("Upload an image and let AI convert it to CSV format.")
 
 # Define simple wrapper functions that handle version differences directly
 def safe_st_image(image, caption=None):
@@ -118,9 +179,6 @@ def convert_standard_to_dataframe(text_content):
         return text_content
 
 def main():
-    st.title("Image to CSV Converter")
-    st.write("Upload an image and let AI convert it to CSV format.")
-    
     # Setup client
     client, gpt4o_deployment = setup_client()
     
