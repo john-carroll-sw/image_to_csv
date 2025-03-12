@@ -173,10 +173,11 @@ else
         --docker-registry-server-url https://$ACR_NAME.azurecr.io
 fi
 
-# Get all environment variable names from .env file
+# Get all environment variable names from .env file - EXCLUDE FRONTEND_URL
 ENV_VARS=$(grep -v '^#' .env | grep -v '^AZURE_RESOURCE' | grep -v '^AZURE_LOCATION' \
           | grep -v '^AZURE_ACR' | grep -v '^AZURE_APP_SERVICE' | grep -v '^AZURE_KEY_VAULT' \
-          | grep -v '^AZURE_LOG_ANALYTICS' | grep -v 'DOCKER_IMAGE_TAG' | grep '=' | cut -d '=' -f1)
+          | grep -v '^AZURE_LOG_ANALYTICS' | grep -v 'DOCKER_IMAGE_TAG' | grep -v 'FRONTEND_URL' \
+          | grep '=' | cut -d '=' -f1)
 
 # Build the appsettings command
 APPSETTINGS_CMD="az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --settings"
@@ -188,9 +189,108 @@ for var in $ENV_VARS; do
     APPSETTINGS_CMD="$APPSETTINGS_CMD $var='$value'"
 done
 
+# Before setting environment variables in Azure Web App
+echo "===== FRONTEND_URL DEBUG ====="
+echo "Setting FRONTEND_URL for the deployed app..."
+echo "APP_NAME = $APP_NAME"
+echo "WEB_APP_NAME = $WEB_APP_NAME"
+FRONTEND_URL="https://$WEB_APP_NAME.azurewebsites.net"
+# Remove trailing slash if present
+FRONTEND_URL=${FRONTEND_URL%/}
+echo "FRONTEND_URL = $FRONTEND_URL"
+
+# Add verification
+if [[ "$FRONTEND_URL" != "https://app-$APP_NAME.azurewebsites.net" ]]; then
+    echo "WARNING: FRONTEND_URL doesn't match expected format. Expected: https://app-$APP_NAME.azurewebsites.net"
+    echo "This could indicate a script variable issue."
+    
+    # Prompt to confirm or override
+    read -p "Continue with $FRONTEND_URL? (y/n or enter a custom URL): " response
+    if [[ "$response" == "n" ]]; then
+        echo "Deployment aborted by user"
+        exit 1
+    elif [[ "$response" != "y" ]]; then
+        # User entered a custom URL
+        FRONTEND_URL="$response"
+        echo "Using custom FRONTEND_URL: $FRONTEND_URL"
+    fi
+else
+    echo "✅ FRONTEND_URL format is correct"
+fi
+
+# Set FRONTEND_URL separately with explicit error handling
+echo "===== FRONTEND_URL UPDATE ====="
+echo "Setting FRONTEND_URL for the deployed app..."
+# Remove trailing slash if present
+FRONTEND_URL=${FRONTEND_URL%/}
+echo "FRONTEND_URL = $FRONTEND_URL"
+
+# Set FRONTEND_URL explicitly (separate from other environment variables)
+echo "Setting FRONTEND_URL directly..."
+set +e  # Don't exit on error for this command
+FRONTEND_URL_RESULT=$(az webapp config appsettings set --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP --settings FRONTEND_URL="$FRONTEND_URL" 2>&1)
+FRONTEND_URL_EXIT_CODE=$?
+set -e  # Resume exit on error
+
+if [ $FRONTEND_URL_EXIT_CODE -ne 0 ]; then
+    echo "⚠️ Error setting FRONTEND_URL: $FRONTEND_URL_RESULT"
+    echo "Will try again with the rest of the settings"
+else
+    echo "✅ FRONTEND_URL set successfully"
+fi
+
+# Continue with setting other environment variables
+# Add FRONTEND_URL to app settings command AFTER the loop
+APPSETTINGS_CMD="$APPSETTINGS_CMD FRONTEND_URL='$FRONTEND_URL'"
+
 # Set environment variables in Azure Web App
 echo "Setting environment variables in Azure Web App: $WEB_APP_NAME"
+echo "Command: $APPSETTINGS_CMD"
 eval $APPSETTINGS_CMD
+
+# Double check FRONTEND_URL after all settings are applied
+echo "Verifying FRONTEND_URL in Azure..."
+set +e  # Don't exit on error
+FRONTEND_URL_CHECK=$(az webapp config appsettings list --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP --query "[?name=='FRONTEND_URL'].value" -o tsv)
+set -e  # Resume exit on error
+
+if [ -z "$FRONTEND_URL_CHECK" ]; then
+    echo "⚠️ FRONTEND_URL is not set in Azure! Trying one more time..."
+    
+    # Try one more time with a different approach
+    az webapp config appsettings set --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP \
+        --slot-settings FRONTEND_URL="$FRONTEND_URL"
+    
+    # Final verification
+    FRONTEND_URL_FINAL=$(az webapp config appsettings list --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP --query "[?name=='FRONTEND_URL'].value" -o tsv)
+    
+    if [ -z "$FRONTEND_URL_FINAL" ]; then
+        echo "❌ Failed to set FRONTEND_URL after multiple attempts. Please set it manually:"
+        echo ""
+        echo "Run this command:"
+        echo "az webapp config appsettings set --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP --settings FRONTEND_URL=\"$FRONTEND_URL\""
+        echo ""
+        echo "Or set it in the Azure Portal:"
+        echo "1. Go to https://portal.azure.com/"
+        echo "2. Navigate to App Service '$WEB_APP_NAME'"
+        echo "3. Go to Settings > Configuration"
+        echo "4. Add new application setting:"
+        echo "   - Name: FRONTEND_URL"
+        echo "   - Value: $FRONTEND_URL"
+        echo "5. Click Save and restart the app"
+    else
+        echo "✅ FRONTEND_URL successfully set on final attempt: $FRONTEND_URL_FINAL"
+    fi
+else
+    if [ "$FRONTEND_URL_CHECK" != "$FRONTEND_URL" ]; then
+        echo "⚠️ FRONTEND_URL mismatch!"
+        echo "Current value: $FRONTEND_URL_CHECK"
+        echo "Expected value: $FRONTEND_URL"
+        echo "Please update it manually using the instructions above."
+    else
+        echo "✅ FRONTEND_URL verified: $FRONTEND_URL_CHECK"
+    fi
+fi
 
 # Enable application logs
 echo "Enabling application logs for Web App: $WEB_APP_NAME"

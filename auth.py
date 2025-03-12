@@ -5,11 +5,18 @@ import base64
 import requests
 import streamlit as st
 import logging
+import sys
 from urllib.parse import urlencode
 from dotenv import load_dotenv
 
-# Set up logger
+# Set up logger with explicit console handler for Azure Web App logs
 logger = logging.getLogger('auth')
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler(sys.stdout)
+handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - AUTH - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 # Load environment variables
 load_dotenv(override=True)
@@ -18,11 +25,38 @@ load_dotenv(override=True)
 AUTH_URL = os.getenv("VITE_AUTH_URL")
 AUTH_ENABLED = os.getenv("VITE_AUTH_ENABLED", "true").lower() == "true"
 
+# Log all environment variables related to auth
+logger.info(f"AUTH_URL: {AUTH_URL}")
+logger.info(f"AUTH_ENABLED: {AUTH_ENABLED}")
+
+# Get frontend URL with explicit logging - PRIORITIZE AZURE ENVIRONMENT
+frontend_url = os.environ.get("FRONTEND_URL")  # Use os.environ.get directly instead of getenv for precedence
+logger.info(f"FRONTEND_URL from direct environment: {frontend_url}")
+
+# If not found in environment, try .env file
+if not frontend_url:
+    frontend_url = os.getenv("FRONTEND_URL")
+    logger.info(f"FRONTEND_URL from .env file: {frontend_url}")
+
+# Final fallback
+if not frontend_url:
+    frontend_url = "https://app-image2csv.azurewebsites.net"
+    logger.warning(f"FRONTEND_URL not found anywhere, using hardcoded default: {frontend_url}")
+
+# Ensure the URL doesn't have trailing slashes - IMPORTANT FOR AUTH REDIRECTION
+if frontend_url and frontend_url.endswith('/'):
+    frontend_url = frontend_url[:-1]
+    logger.info(f"Removed trailing slash from FRONTEND_URL: {frontend_url}")
+
 # Frontend info for authentication
 FRONTEND_INFO = {
-    "app": "AI in Action Streamlit",
-    "url": os.getenv("STREAMLIT_SERVER_BASE_URL", "http://localhost:8501")
+    "app": "image2csv",
+    "url": frontend_url
 }
+
+# Log the frontend info for debugging with explicit JSON serialization
+frontend_info_json = json.dumps(FRONTEND_INFO)
+logger.info(f"Using FRONTEND_INFO for auth redirection: {frontend_info_json}")
 
 def initialize_auth():
     """Initialize authentication state variables if they don't exist."""
@@ -51,6 +85,12 @@ def redirect_to_signin():
     """Redirect to authentication service signin page"""
     encoded_info = encode_token(FRONTEND_INFO)
     signin_url = f"{AUTH_URL}/signin/?v={encoded_info}"
+    
+    # Decode for logging to see exactly what we're sending
+    decoded = json.dumps(json.loads(base64.b64decode(encoded_info)))
+    logger.info(f"Auth redirect with encoded info: {encoded_info}")
+    logger.info(f"Auth redirect with decoded info: {decoded}")
+    logger.info(f"Full signin URL: {signin_url}")
     
     # Enhanced redirect with both meta refresh and JavaScript
     st.markdown(f"""
@@ -147,7 +187,10 @@ def is_authenticated():
 
 def require_auth():
     """Main authentication function to be used in Streamlit apps"""
+    logger.info("Starting authentication check")
+    
     if not AUTH_ENABLED:
+        logger.info("Authentication is disabled, proceeding without auth")
         return True
         
     # Initialize authentication state
@@ -155,33 +198,41 @@ def require_auth():
     
     # Check if already authenticated in this session
     if st.session_state.authenticated:
+        logger.info("User is already authenticated in session")
         return True
         
     # Check for token in query params
     token_from_url = parse_token_from_url()
     
     if token_from_url:
+        logger.info("Found token in URL, validating...")
         # Validate token
         is_valid = check_auth(token_from_url)
         if is_valid:
+            logger.info("Token from URL is valid")
             st.session_state.auth_token = token_from_url
             st.session_state.authenticated = True
             return True
         else:
+            logger.warning("Token from URL is invalid, redirecting to sign-in")
             redirect_to_signin()
             
     # Check for token in session state
     elif "auth_token" in st.session_state and st.session_state.auth_token:
+        logger.info("Found token in session state, validating...")
         is_valid = check_auth(st.session_state.auth_token)
         if is_valid:
+            logger.info("Token from session state is valid")
             st.session_state.authenticated = True
             return True
         else:
+            logger.warning("Token from session state is invalid, redirecting to sign-in")
             st.session_state.auth_token = None
             redirect_to_signin()
     
     # No token found
     else:
+        logger.info("No token found, redirecting to sign-in")
         redirect_to_signin()
         
     return False

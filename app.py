@@ -4,17 +4,60 @@ import os
 import json
 import streamlit as st
 import pandas as pd
+import logging
+import sys
 from dotenv import load_dotenv
 from pydantic import BaseModel, create_model
 from typing import List, Optional, Dict, Any, Type, get_type_hints, get_origin, get_args
 from utils import setup_client
 from auth import require_auth, get_username, logout, is_authenticated, AUTH_ENABLED
 
+# Configure logging to stdout for Azure Web App logs
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - APP - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+# Load environment variables and log key variables
+load_dotenv(override=True)
+logger.info(f"AUTH_ENABLED: {os.getenv('VITE_AUTH_ENABLED', 'Not set')}")
+logger.info(f"FRONTEND_URL: {os.getenv('FRONTEND_URL', 'Not set')}")
+logger.info(f"AUTH_URL: {os.getenv('VITE_AUTH_URL', 'Not set')}")
+logger.info(f"AZURE_OPENAI_EASTUS_ENDPOINT: {os.getenv('AZURE_OPENAI_EASTUS_ENDPOINT', 'Not set')[:10]}...")
+
 # Set page configuration
 st.set_page_config(
     page_title="Image to CSV Converter",
     page_icon="📊",
 )
+
+logger.info("Starting authentication process")
+
+# Check for logout action through query parameter
+if AUTH_ENABLED and "logout" in st.query_params:
+    logger.info("Logout action detected in query parameters")
+    st.query_params.clear()
+    logout()
+    # Don't call st.rerun() here, logout() will handle redirection
+
+# Check authentication before proceeding
+logger.info("Checking authentication status")
+if not require_auth():
+    logger.info("Authentication failed, stopping app execution")
+    st.stop()
+
+logger.info("Authentication successful, continuing with app")
+
+# # Debug environment variables (remove this in production)
+# if AUTH_ENABLED:
+#     with st.expander("Debug Environment", expanded=False):
+#         st.write(f"FRONTEND_URL: {os.environ.get('FRONTEND_URL', 'Not set')}")
+#         st.write(f"Auth URL: {os.environ.get('VITE_AUTH_URL', 'Not set')}")
+#         st.write(f"Auth Enabled: {os.environ.get('VITE_AUTH_ENABLED', 'Not set')}")
+#         from auth import FRONTEND_INFO
+#         st.write(f"FRONTEND_INFO in auth.py: {FRONTEND_INFO}")
 
 # Check for logout action through query parameter
 if AUTH_ENABLED and "logout" in st.query_params:
