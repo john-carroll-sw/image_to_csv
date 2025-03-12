@@ -8,9 +8,9 @@ import logging
 import sys
 from dotenv import load_dotenv
 from pydantic import BaseModel, create_model
-from typing import List, Optional, Dict, Any, Type, get_type_hints, get_origin, get_args
+from typing import List, Optional, Dict, Any
 from utils import setup_client
-from auth import require_auth, get_username, logout, is_authenticated, AUTH_ENABLED
+from auth import require_auth, logout, is_authenticated, AUTH_ENABLED
 
 # Configure logging to stdout for Azure Web App logs
 logging.basicConfig(
