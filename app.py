@@ -1,11 +1,12 @@
 import base64
 import io
 import os
+import json
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, create_model
+from typing import List, Optional, Dict, Any, Type, get_type_hints, get_origin, get_args
 from utils import setup_client
 from auth import require_auth, get_username, logout, is_authenticated, AUTH_ENABLED
 
@@ -24,6 +25,37 @@ if AUTH_ENABLED and "logout" in st.query_params:
 # Check authentication before proceeding
 if not require_auth():
     st.stop()
+
+# Define default prompt templates and schema
+DEFAULT_STRUCTURED_SYSTEM_PROMPT = """You are an expert in analyzing images and extracting structured data. Extract data from the image into a CSV format with appropriate headers and data values. Ensure all rows have the same number of columns as there are headers."""
+
+DEFAULT_STRUCTURED_USER_PROMPT = """Please analyze this image and provide the data in a structured format with headers and rows."""
+
+DEFAULT_STANDARD_SYSTEM_PROMPT = """You are an expert in analyzing images and extracting structured data. Extract data from the image into a CSV format with appropriate headers and data types. Return ONLY the CSV data without any markdown formatting or explanation text."""
+
+DEFAULT_STANDARD_USER_PROMPT = """Please analyze this image and provide the data in a CSV format."""
+
+# Define default Pydantic schema as a JSON string
+DEFAULT_SCHEMA_JSON = """
+{
+    "CSVData": {
+        "headers": "List[str]",
+        "rows": "List[List[str]]"
+    }
+}
+"""
+
+# Initialize session state for editable prompts and schema
+if "structured_system_prompt" not in st.session_state:
+    st.session_state.structured_system_prompt = DEFAULT_STRUCTURED_SYSTEM_PROMPT
+if "structured_user_prompt" not in st.session_state:
+    st.session_state.structured_user_prompt = DEFAULT_STRUCTURED_USER_PROMPT
+if "standard_system_prompt" not in st.session_state:
+    st.session_state.standard_system_prompt = DEFAULT_STANDARD_SYSTEM_PROMPT
+if "standard_user_prompt" not in st.session_state:
+    st.session_state.standard_user_prompt = DEFAULT_STANDARD_USER_PROMPT
+if "schema_json" not in st.session_state:
+    st.session_state.schema_json = DEFAULT_SCHEMA_JSON
 
 # Header with GitHub link and user info
 header_cols = st.columns([4, 2])
@@ -66,7 +98,6 @@ with header_cols[1]:
 # Full width title below
 st.title("Image to CSV Converter")
 
-
 st.write("Upload an image and let AI convert it to CSV format.")
 
 # Define simple wrapper functions that handle version differences directly
@@ -92,6 +123,51 @@ def safe_st_dataframe(data):
             # Just display it without width parameters
             return st.dataframe(data)
 
+def parse_type_annotation(annotation_str):
+    """Parse a string type annotation into a Python type."""
+    type_mapping = {
+        "str": str,
+        "int": int,
+        "float": float,
+        "bool": bool,
+        "List[str]": List[str],
+        "List[int]": List[int],
+        "List[float]": List[float],
+        "List[List[str]]": List[List[str]],
+        "List[List[int]]": List[List[int]],
+        "List[List[float]]": List[List[float]],
+        "Dict[str, Any]": Dict[str, Any],
+        "Optional[str]": Optional[str],
+        "Any": Any
+    }
+    
+    return type_mapping.get(annotation_str.strip(), str)
+
+def create_pydantic_model_from_json(schema_json):
+    """Dynamically create a Pydantic model from a JSON schema definition."""
+    try:
+        schema_dict = json.loads(schema_json)
+        
+        # We expect a dictionary with a single key (model name) and a nested dictionary (fields)
+        model_name = list(schema_dict.keys())[0]
+        fields = {}
+        
+        for field_name, field_type_str in schema_dict[model_name].items():
+            fields[field_name] = (parse_type_annotation(field_type_str), ...)
+        
+        # Create and return the model
+        return create_model(model_name, **fields)
+    
+    except Exception as e:
+        st.error(f"Error creating model from schema: {str(e)}")
+        
+        # Fall back to default model
+        class CSVData(BaseModel):
+            headers: List[str]
+            rows: List[List[str]]
+        
+        return CSVData
+
 # Define the structured output model
 class CSVRow(BaseModel):
     values: List[str]
@@ -108,24 +184,27 @@ def analyze_image_with_structured_output(client, deployment, image_bytes):
     """Send image to Azure OpenAI and get structured CSV data."""
     base64_image = encode_image(image_bytes)
     
+    # Create Pydantic model from schema
+    response_format = create_pydantic_model_from_json(st.session_state.schema_json)
+    
     try:
         response = client.beta.chat.completions.parse(
             model=deployment,
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an expert in analyzing images and extracting structured data. Extract data from the image into a CSV format with appropriate headers and data values. Ensure all rows have the same number of columns as there are headers."
+                    "content": st.session_state.structured_system_prompt
                 },
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Please analyze this image and provide the data in a structured format with headers and rows."},
+                        {"type": "text", "text": st.session_state.structured_user_prompt},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                     ]
                 }
             ],
             temperature=0,
-            response_format=CSVData
+            response_format=response_format
         )
         
         return response.choices[0].message.parsed
@@ -143,12 +222,12 @@ def analyze_image_with_standard_output(client, deployment, image_bytes):
         messages=[
             {
                 "role": "system",
-                "content": "You are an expert in analyzing images and extracting structured data. Extract data from the image into a CSV format with appropriate headers and data types. Return ONLY the CSV data without any markdown formatting or explanation text."
+                "content": st.session_state.standard_system_prompt
             },
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Please analyze this image and provide the data in a CSV format."},
+                    {"type": "text", "text": st.session_state.standard_user_prompt},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                 ]
             }
@@ -158,13 +237,38 @@ def analyze_image_with_standard_output(client, deployment, image_bytes):
     
     return response.choices[0].message.content
 
-def convert_structured_to_dataframe(csv_data):
-    """Convert structured CSV data to pandas DataFrame."""
-    headers = csv_data.headers
-    rows = csv_data.rows
-    
-    # Create DataFrame
-    return pd.DataFrame(rows, columns=headers)
+def convert_structured_to_dataframe(structured_data):
+    """Convert structured data to pandas DataFrame."""
+    # Handle different schema formats
+    if hasattr(structured_data, 'headers') and hasattr(structured_data, 'rows'):
+        # Standard CSV format
+        headers = structured_data.headers
+        rows = structured_data.rows
+        return pd.DataFrame(rows, columns=headers)
+    elif hasattr(structured_data, 'data') and isinstance(structured_data.data, list):
+        # List of dictionaries format
+        return pd.DataFrame(structured_data.data)
+    else:
+        # Try to convert the object to a dict and then to DataFrame
+        try:
+            data_dict = structured_data.dict()
+            if isinstance(data_dict, dict):
+                # If it's a flat dictionary, convert to a single-row DataFrame
+                if not any(isinstance(v, (list, dict)) for v in data_dict.values()):
+                    return pd.DataFrame([data_dict])
+                # If it contains a 'rows' or 'data' key that is a list
+                elif 'rows' in data_dict and isinstance(data_dict['rows'], list):
+                    if 'headers' in data_dict:
+                        return pd.DataFrame(data_dict['rows'], columns=data_dict['headers'])
+                    else:
+                        return pd.DataFrame(data_dict['rows'])
+                elif 'data' in data_dict and isinstance(data_dict['data'], list):
+                    return pd.DataFrame(data_dict['data'])
+                else:
+                    return pd.DataFrame.from_dict(data_dict)
+        except Exception as e:
+            st.warning(f"Conversion to DataFrame failed: {str(e)}")
+            return pd.DataFrame([vars(structured_data)])
 
 def convert_standard_to_dataframe(text_content):
     """Convert text response to DataFrame as a fallback."""
@@ -177,6 +281,14 @@ def convert_standard_to_dataframe(text_content):
         
         # Return the raw text for manual handling
         return text_content
+
+def reset_prompts():
+    """Reset prompts and schema to default values"""
+    st.session_state.structured_system_prompt = DEFAULT_STRUCTURED_SYSTEM_PROMPT
+    st.session_state.structured_user_prompt = DEFAULT_STRUCTURED_USER_PROMPT
+    st.session_state.standard_system_prompt = DEFAULT_STANDARD_SYSTEM_PROMPT
+    st.session_state.standard_user_prompt = DEFAULT_STANDARD_USER_PROMPT
+    st.session_state.schema_json = DEFAULT_SCHEMA_JSON
 
 def main():
     # Setup client
@@ -191,8 +303,99 @@ def main():
         "Select model",
         ["GPT-4o"],
         index=0,
-        help="GPT-4o offers higher accuracy but may be slower"
+        help="WIP: May add more models in the future"
     )
+    
+    # Create an expander for configuration (renamed from "Edit Model Prompts")
+    with st.expander("Configuration", expanded=False):
+        # Add a reset button at the top
+        if st.button("Reset to Defaults"):
+            reset_prompts()
+            st.rerun()
+        
+        st.markdown("### Structured Output Mode")
+        st.markdown("#### System Prompt:")
+        # Fix: Use a different key for the widget than the session state variable
+        structured_sys = st.text_area(
+            "Structured System Prompt", 
+            value=st.session_state.structured_system_prompt,
+            height=150, 
+            key="structured_system_input"
+        )
+        # Update session state separately
+        st.session_state.structured_system_prompt = structured_sys
+        
+        st.markdown("#### User Prompt:")
+        structured_user = st.text_area(
+            "Structured User Prompt", 
+            value=st.session_state.structured_user_prompt,
+            height=100, 
+            key="structured_user_input"
+        )
+        st.session_state.structured_user_prompt = structured_user
+        
+        st.markdown("#### Response Schema (JSON):")
+        st.info("Define the structure of the expected response. This must be a valid JSON with type annotations.")
+        schema = st.text_area(
+            "Schema Definition", 
+            value=st.session_state.schema_json,
+            height=150, 
+            key="schema_json_input"
+        )
+        st.session_state.schema_json = schema
+        
+        # Schema examples as part of the main expander
+        st.markdown("#### Schema Examples:")
+        st.markdown("Standard CSV format:")
+        st.code("""
+{
+    "CSVData": {
+        "headers": "List[str]",
+        "rows": "List[List[str]]"
+    }
+}
+        """, language="json")
+        
+        st.markdown("Table with list of records format:")
+        st.code("""
+{
+    "TableData": {
+        "data": "List[Dict[str, Any]]"
+    }
+}
+        """, language="json")
+        
+        # Checkbox to show/hide fallback configuration
+        show_fallback = st.checkbox("Show Fallback Configuration", value=False, 
+                                   help="Configure the fallback mode that runs if structured output fails")
+        
+        if show_fallback:
+            st.markdown("---")
+            st.markdown("### Standard Output Mode (Fallback)")
+            st.markdown("""
+            <div style="padding: 10px; border-radius: 5px; margin-bottom: 10px;">
+                <p><strong>Note:</strong> This fallback mode is used when structured output parsing fails. 
+                It requests raw CSV text and attempts to parse it directly.</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.markdown("#### System Prompt:")
+            standard_sys = st.text_area(
+                "Standard System Prompt", 
+                value=st.session_state.standard_system_prompt,
+                height=150, 
+                key="standard_system_input"
+            )
+            st.session_state.standard_system_prompt = standard_sys
+            
+            st.markdown("#### User Prompt:")
+            standard_user = st.text_area(
+                "Standard User Prompt", 
+                value=st.session_state.standard_user_prompt,
+                height=100, 
+                key="standard_user_input"
+            )
+            st.session_state.standard_user_prompt = standard_user
     
     # Map selection to deployment name
     deployment = gpt4o_deployment if model_option == "GPT-4o" else "GPT-4o"
@@ -212,8 +415,11 @@ def main():
                     structured_result = analyze_image_with_structured_output(client, deployment, image_bytes)
                     
                     if structured_result:
+                        # Show which method was used
+                        st.info("✅ Used Structured Output Mode")
+                        
                         # Convert structured output to DataFrame
-                        st.success("✅ Successfully extracted structured data!")
+                        st.success("Successfully extracted structured data!")
                         
                         # Convert to DataFrame and display
                         df = convert_structured_to_dataframe(structured_result)
@@ -235,6 +441,9 @@ def main():
                         # Fall back to standard output
                         with st.spinner("Structured parsing failed, trying standard method..."):
                             standard_result = analyze_image_with_standard_output(client, deployment, image_bytes)
+                            
+                            # Show which method was used
+                            st.info("🔄 Used Standard Output Mode (Fallback)")
                             
                             # Display raw output in expander
                             with st.expander("Show Raw API Response", expanded=False):
